@@ -149,25 +149,18 @@ def to_int(val):
     except: return 0
 
 # ============================================================
-# 5. 핵심 점검 함수 (하드코딩 제거 및 동적 인덱스 매핑)
+# 5. 핵심 점검 함수 (재량휴업일 오류 점검 추가)
 # ============================================================
 def extract_column_indices(df):
-    """
-    엑셀 상위 10개 행을 분석하여 동적으로 필요한 컬럼의 인덱스(열 번호)를 찾아냅니다.
-    - 병합된 엑셀 셀(NaN) 문제를 해결하기 위해 ffill(앞선 값으로 채우기)을 사용합니다.
-    """
-    # 상단 10행을 헤더 영역으로 추출 (안전을 위해 넉넉히 잡음)
     header_area = df.iloc[:10].copy()
-    
-    # 병합된 셀 처리: 가로(axis=1), 세로(axis=0)로 빈칸을 앞의 값으로 채움
     header_area = header_area.ffill(axis=1).ffill(axis=0)
     
-    col_map = {}
+    # 여러 개의 날짜 칸을 담기 위해 리스트로 초기화
+    col_map = {"disc_dates_1": [], "disc_dates_2": []}
+    
     for col in range(header_area.shape[1]):
-        # 해당 열(Column)의 모든 텍스트를 공백 및 줄바꿈 없이 하나로 결합
         text = "".join(str(x).replace('\n', '').replace(' ', '') for x in header_area.iloc[:, col] if pd.notna(x))
         
-        # 각 키워드 조건에 따라 해당하는 열의 번호를 매핑
         if "연번" in text and "학교명" not in text and "serial" not in col_map:
             col_map["serial"] = col
         elif "학교명" in text and "school_name" not in col_map:
@@ -202,8 +195,13 @@ def extract_column_indices(df):
             col_map["disc1"] = col
         elif "재량" in text and "2학기" in text and "수" in text and "날짜" not in text and "disc2" not in col_map:
             col_map["disc2"] = col
+            
+        # [추가] 재량휴업일 날짜가 입력되는 칸 인덱스 수집
+        elif "재량" in text and "1학기" in text and "날짜" in text:
+            col_map["disc_dates_1"].append(col)
+        elif "재량" in text and "2학기" in text and "날짜" in text:
+            col_map["disc_dates_2"].append(col)
 
-    # 혹시라도 양식이 심하게 훼손되어 열을 찾지 못했을 경우를 대비한 폴백(안전 장치)
     defaults = {
         "serial": 0, "school_name": 6, "grade": 12, "sem1": 13, "sem2": 14,
         "open": 16, "s_close": 17, "s_open": 18, "w_close": 19, "w_open": 20,
@@ -215,56 +213,45 @@ def extract_column_indices(df):
             
     return col_map
 
-def check_school(file_name, df, holidays_set):
+# 변경: holidays_set 대신 holidays_dict를 받아 공휴일 이름을 출력할 수 있게 함
+def check_school(file_name, df, holidays_dict):
     school_name = os.path.basename(file_name).split('_')[0]
     errors, details = [], []
-
-    # 1) 파일 구조를 바탕으로 동적으로 컬럼 인덱스 분석
     col_idx = extract_column_indices(df)
 
     rows_12, rows_3 = [], []
     for idx in range(df.shape[0]):
         row = df.iloc[idx]
-        
-        # 2) 추출한 인덱스 번호를 사용
         grade = str(row.iloc[col_idx["grade"]]).strip() if pd.notna(row.iloc[col_idx["grade"]]) else ''
         serial = str(row.iloc[col_idx["serial"]]).strip() if pd.notna(row.iloc[col_idx["serial"]]) else ''
         
-        if serial == '예시':
-            continue
-        if grade == '1~2':
-            rows_12.append(row)
-        elif grade == '3':
-            rows_3.append(row)
+        if serial == '예시': continue
+        if grade == '1~2': rows_12.append(row)
+        elif grade == '3': rows_3.append(row)
 
     if not rows_12 or not rows_3:
         errors.append(f"[{school_name}] 데이터 행(1~2학년/3학년)을 찾을 수 없습니다.")
         return errors, details
 
     for r12, r3 in zip(rows_12, rows_3):
-        # 3) 모든 데이터 추출에 하드코딩된 숫자 대신 동적 인덱스(col_idx) 적용
         sname = str(r12.iloc[col_idx["school_name"]]) if pd.notna(r12.iloc[col_idx["school_name"]]) else school_name
 
         open_12      = to_date(r12.iloc[col_idx["open"]])
         open_3       = to_date(r3.iloc[col_idx["open"]])
-        
         s_close_12   = to_date(r12.iloc[col_idx["s_close"]])
         s_open_12    = to_date(r12.iloc[col_idx["s_open"]])
         w_close_12   = to_date(r12.iloc[col_idx["w_close"]])
         w_open_12    = to_date(r12.iloc[col_idx["w_open"]])
         end_12       = to_date(r12.iloc[col_idx["end_12"]])
-        
         s_close_3    = to_date(r3.iloc[col_idx["s_close"]])
         s_open_3     = to_date(r3.iloc[col_idx["s_open"]])
         w_close_3    = to_date(r3.iloc[col_idx["w_close"]])
         w_open_3     = to_date(r3.iloc[col_idx["w_open"]])
         grad_3       = to_date(r3.iloc[col_idx["grad_3"]])
-        if grad_3 is None:
-            grad_3   = to_date(r3.iloc[col_idx["end_12"]])  # 졸업식이 없으면 종업식 인덱스로 대체
+        if grad_3 is None: grad_3 = to_date(r3.iloc[col_idx["end_12"]])
 
         sem1_12, sem2_12   = to_int(r12.iloc[col_idx["sem1"]]), to_int(r12.iloc[col_idx["sem2"]])
         sem1_3,  sem2_3    = to_int(r3.iloc[col_idx["sem1"]]),  to_int(r3.iloc[col_idx["sem2"]])
-        
         disc1_12, disc2_12 = to_int(r12.iloc[col_idx["disc1"]]), to_int(r12.iloc[col_idx["disc2"]])
         disc1_3,  disc2_3  = to_int(r3.iloc[col_idx["disc1"]]),  to_int(r3.iloc[col_idx["disc2"]])
 
@@ -273,77 +260,79 @@ def check_school(file_name, df, holidays_set):
         # --- 점검 1: 개학일 비교 ---
         details.append("\n**[점검1] 개학일 비교**")
         if open_12 and open_3:
-            if open_12 == open_3:
-                details.append(f"- ✅ 개학일 동일 ({open_12})")
+            if open_12 == open_3: details.append(f"- ✅ 개학일 동일 ({open_12})")
             else:
                 msg = f"❌ 개학일 불일치: 1~2학년({open_12}) vs 3학년({open_3})"
-                details.append(f"- {msg}")
-                errors.append(f"[{sname}] {msg}")
+                details.append(f"- {msg}"); errors.append(f"[{sname}] {msg}")
         else:
-            msg = f"⚠️ 개학일 데이터 누락 (1~2학년={open_12}, 3학년={open_3})"
-            details.append(f"- {msg}")
-            errors.append(f"[{sname}] {msg}")
+            msg = f"⚠️ 개학일 데이터 누락"
+            details.append(f"- {msg}"); errors.append(f"[{sname}] {msg}")
 
         # --- 점검 2: 1학기 수업일수 ---
-        for label, od, sc, s1d, d1 in [
-            ("1~2학년", open_12, s_close_12, sem1_12, disc1_12),
-            ("3학년",   open_3,  s_close_3,  sem1_3,  disc1_3),
-        ]:
+        for label, od, sc, s1d, d1 in [("1~2학년", open_12, s_close_12, sem1_12, disc1_12), ("3학년", open_3, s_close_3, sem1_3, disc1_3)]:
             details.append(f"\n**[점검2] {label} 1학기 수업일수**")
             if od and sc:
                 wd = count_weekdays(od, sc)
-                hol = count_holidays_in_range(od, sc, holidays_set)
+                hol = count_holidays_in_range(od, sc, holidays_dict)
                 calc = wd - hol - d1
-                details.append(f"- 개학일({od}) → 여름방학식({sc})")
-                details.append(f"- 평일 {wd}일 − 공휴일 {hol}일 − 재량휴업 {d1}일 = **{calc}일**")
-                details.append(f"- 기재 수업일수: **{s1d}일**")
-                if calc == s1d:
-                    details.append("- ✅ 일치")
+                details.append(f"- 평일 {wd}일 − 공휴일 {hol}일 − 재량휴업 {d1}일 = **{calc}일** (기재: {s1d}일)")
+                if calc == s1d: details.append("- ✅ 일치")
                 else:
-                    msg = f"❌ {label} 1학기 불일치: 계산 {calc}일 vs 기재 {s1d}일 (차이 {calc - s1d:+d}일)"
-                    details.append(f"- {msg}")
-                    errors.append(f"[{sname}] {msg}")
+                    msg = f"❌ {label} 1학기 불일치: 계산 {calc}일 vs 기재 {s1d}일"
+                    details.append(f"- {msg}"); errors.append(f"[{sname}] {msg}")
             else:
-                msg = f"⚠️ {label} 1학기 날짜 누락"
-                details.append(f"- {msg}")
-                errors.append(f"[{sname}] {msg}")
+                details.append(f"- ⚠️ 1학기 날짜 누락")
 
         # --- 점검 3: 2학기 수업일수 ---
-        for label, so, wc, wo, ed, s2d, d2 in [
-            ("1~2학년", s_open_12, w_close_12, w_open_12, end_12,  sem2_12, disc2_12),
-            ("3학년",   s_open_3,  w_close_3,  w_open_3,  grad_3,  sem2_3,  disc2_3),
-        ]:
+        for label, so, wc, wo, ed, s2d, d2 in [("1~2학년", s_open_12, w_close_12, w_open_12, end_12, sem2_12, disc2_12), ("3학년", s_open_3, w_close_3, w_open_3, grad_3, sem2_3, disc2_3)]:
             details.append(f"\n**[점검3] {label} 2학기 수업일수**")
             if so and wc:
                 wd_main = count_weekdays(so, wc)
-                hol_main = count_holidays_in_range(so, wc, holidays_set)
+                hol_main = count_holidays_in_range(so, wc, holidays_dict)
                 calc = wd_main - hol_main - d2
-                details.append(f"- 여름개학식({so}) → 겨울방학식({wc})")
-                details.append(f"- 기본구간: 평일 {wd_main}일 − 공휴일 {hol_main}일 − 재량휴업 {d2}일 = {calc}일")
 
                 if wo is not None and ed is not None:
                     wd_ex = count_weekdays(wo, ed)
-                    hol_ex = count_holidays_in_range(wo, ed, holidays_set)
-                    extra = wd_ex - hol_ex
-                    calc += extra
-                    end_label = '종업식' if label == '1~2학년' else '졸업식'
-                    details.append(f"- 겨울개학식({wo}) → {end_label}({ed}): +{extra}일")
-                    details.append(f"- 총 계산: **{calc}일**")
-                else:
-                    details.append("- 겨울개학식: 공란 → 추가 계산 없음")
-                    details.append(f"- 총 계산: **{calc}일**")
+                    hol_ex = count_holidays_in_range(wo, ed, holidays_dict)
+                    calc += (wd_ex - hol_ex)
 
-                details.append(f"- 기재 수업일수: **{s2d}일**")
-                if calc == s2d:
-                    details.append("- ✅ 일치")
+                details.append(f"- 총 계산: **{calc}일** (기재: {s2d}일)")
+                if calc == s2d: details.append("- ✅ 일치")
                 else:
-                    msg = f"❌ {label} 2학기 불일치: 계산 {calc}일 vs 기재 {s2d}일 (차이 {calc - s2d:+d}일)"
+                    msg = f"❌ {label} 2학기 불일치: 계산 {calc}일 vs 기재 {s2d}일"
+                    details.append(f"- {msg}"); errors.append(f"[{sname}] {msg}")
+            else:
+                details.append(f"- ⚠️ 2학기 날짜 누락")
+
+        # --- 점검 4: 재량휴업일 공휴일/주말 중복 점검 (신규) ---
+        details.append("\n**[점검4] 재량휴업일 적합성 점검 (공휴일/주말 중복 여부)**")
+        
+        def get_valid_dates(row, col_list):
+            return [to_date(row.iloc[c]) for c in col_list if to_date(row.iloc[c]) is not None]
+
+        overlap_found = False
+        for label, term, dates in [
+            ("1~2학년", "1학기", get_valid_dates(r12, col_idx.get("disc_dates_1", []))),
+            ("1~2학년", "2학기", get_valid_dates(r12, col_idx.get("disc_dates_2", []))),
+            ("3학년", "1학기", get_valid_dates(r3, col_idx.get("disc_dates_1", []))),
+            ("3학년", "2학기", get_valid_dates(r3, col_idx.get("disc_dates_2", [])))
+        ]:
+            for d in dates:
+                if d in holidays_dict:
+                    hol_name = holidays_dict[d]
+                    msg = f"❌ {label} {term} 재량휴업일({d.strftime('%Y-%m-%d')}) 오류: 공휴일({hol_name})입니다."
                     details.append(f"- {msg}")
                     errors.append(f"[{sname}] {msg}")
-            else:
-                msg = f"⚠️ {label} 2학기 날짜 누락"
-                details.append(f"- {msg}")
-                errors.append(f"[{sname}] {msg}")
+                    overlap_found = True
+                elif d.weekday() >= 5: # 5: 토요일, 6: 일요일
+                    dow = "토" if d.weekday() == 5 else "일"
+                    msg = f"❌ {label} {term} 재량휴업일({d.strftime('%Y-%m-%d')}) 오류: 주말({dow}요일)입니다."
+                    details.append(f"- {msg}")
+                    errors.append(f"[{sname}] {msg}")
+                    overlap_found = True
+
+        if not overlap_found:
+            details.append("- ✅ 기재된 재량휴업일에 공휴일이나 주말이 포함되지 않음")
 
     return errors, details
 
@@ -440,7 +429,7 @@ with st.sidebar:
     """)
 
 # ------ 메인 영역 ------
-holidays_set = set(st.session_state.holidays.keys())
+holidays_dict = st.session_state.holidays
 
 st.header("📂 파일 업로드")
 st.info(f"💡 **{school_year}학년도** 학사일정 파일을 업로드하세요. 여러 학교 파일을 동시에 올릴 수 있습니다.")
@@ -461,7 +450,7 @@ if uploaded_files:
     for uf in uploaded_files:
         try:
             df = pd.read_excel(uf, sheet_name=0, header=None)
-            errs, details = check_school(uf.name, df, holidays_set)
+            errs, details = check_school(uf.name, df, holidays_dict)
             all_results[uf.name] = {"errors": errs, "details": details}
             total_errors += len(errs)
         except Exception as e:
