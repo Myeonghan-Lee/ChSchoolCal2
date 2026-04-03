@@ -149,46 +149,124 @@ def to_int(val):
     except: return 0
 
 # ============================================================
-# 5. 핵심 점검 함수 (기존 로직 유지)
+# 5. 핵심 점검 함수 (하드코딩 제거 및 동적 인덱스 매핑)
 # ============================================================
+def extract_column_indices(df):
+    """
+    엑셀 상위 10개 행을 분석하여 동적으로 필요한 컬럼의 인덱스(열 번호)를 찾아냅니다.
+    - 병합된 엑셀 셀(NaN) 문제를 해결하기 위해 ffill(앞선 값으로 채우기)을 사용합니다.
+    """
+    # 상단 10행을 헤더 영역으로 추출 (안전을 위해 넉넉히 잡음)
+    header_area = df.iloc[:10].copy()
+    
+    # 병합된 셀 처리: 가로(axis=1), 세로(axis=0)로 빈칸을 앞의 값으로 채움
+    header_area = header_area.ffill(axis=1).ffill(axis=0)
+    
+    col_map = {}
+    for col in range(header_area.shape[1]):
+        # 해당 열(Column)의 모든 텍스트를 공백 및 줄바꿈 없이 하나로 결합
+        text = "".join(str(x).replace('\n', '').replace(' ', '') for x in header_area.iloc[:, col] if pd.notna(x))
+        
+        # 각 키워드 조건에 따라 해당하는 열의 번호를 매핑
+        if "연번" in text and "학교명" not in text and "serial" not in col_map:
+            col_map["serial"] = col
+        elif "학교명" in text and "school_name" not in col_map:
+            col_map["school_name"] = col
+        elif "적용학년" in text and "grade" not in col_map:
+            col_map["grade"] = col
+            
+        elif "수업일수" in text and "1학기" in text and "재량" not in text and "고사" not in text and "sem1" not in col_map:
+            col_map["sem1"] = col
+        elif "수업일수" in text and "2학기" in text and "재량" not in text and "고사" not in text and "sem2" not in col_map:
+            col_map["sem2"] = col
+            
+        elif ("개학일" in text or "입학일" in text) and "여름방학" not in text and "겨울방학" not in text and "open" not in col_map:
+            col_map["open"] = col
+            
+        elif "여름방학" in text and "방학식일" in text and "s_close" not in col_map:
+            col_map["s_close"] = col
+        elif "여름방학" in text and "개학식일" in text and "s_open" not in col_map:
+            col_map["s_open"] = col
+            
+        elif "겨울방학" in text and "방학식일" in text and "w_close" not in col_map:
+            col_map["w_close"] = col
+        elif "겨울방학" in text and "개학식일" in text and "w_open" not in col_map:
+            col_map["w_open"] = col
+            
+        elif "종업식" in text and "end_12" not in col_map:
+            col_map["end_12"] = col
+        elif "졸업식" in text and "grad_3" not in col_map:
+            col_map["grad_3"] = col
+            
+        elif "재량" in text and "1학기" in text and "수" in text and "날짜" not in text and "disc1" not in col_map:
+            col_map["disc1"] = col
+        elif "재량" in text and "2학기" in text and "수" in text and "날짜" not in text and "disc2" not in col_map:
+            col_map["disc2"] = col
+
+    # 혹시라도 양식이 심하게 훼손되어 열을 찾지 못했을 경우를 대비한 폴백(안전 장치)
+    defaults = {
+        "serial": 0, "school_name": 6, "grade": 12, "sem1": 13, "sem2": 14,
+        "open": 16, "s_close": 17, "s_open": 18, "w_close": 19, "w_open": 20,
+        "end_12": 21, "grad_3": 22, "disc1": 51, "disc2": 52
+    }
+    for k, v in defaults.items():
+        if k not in col_map:
+            col_map[k] = v
+            
+    return col_map
+
 def check_school(file_name, df, holidays_set):
     school_name = os.path.basename(file_name).split('_')[0]
     errors, details = [], []
+
+    # 1) 파일 구조를 바탕으로 동적으로 컬럼 인덱스 분석
+    col_idx = extract_column_indices(df)
+
     rows_12, rows_3 = [], []
-    
     for idx in range(df.shape[0]):
         row = df.iloc[idx]
-        grade = str(row.iloc[12]).strip() if pd.notna(row.iloc[12]) else ''
-        serial = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
-        if serial == '예시': continue
-        if grade == '1~2': rows_12.append(row)
-        elif grade == '3': rows_3.append(row)
+        
+        # 2) 추출한 인덱스 번호를 사용
+        grade = str(row.iloc[col_idx["grade"]]).strip() if pd.notna(row.iloc[col_idx["grade"]]) else ''
+        serial = str(row.iloc[col_idx["serial"]]).strip() if pd.notna(row.iloc[col_idx["serial"]]) else ''
+        
+        if serial == '예시':
+            continue
+        if grade == '1~2':
+            rows_12.append(row)
+        elif grade == '3':
+            rows_3.append(row)
 
     if not rows_12 or not rows_3:
         errors.append(f"[{school_name}] 데이터 행(1~2학년/3학년)을 찾을 수 없습니다.")
         return errors, details
 
     for r12, r3 in zip(rows_12, rows_3):
-        sname = str(r12.iloc[6]) if pd.notna(r12.iloc[6]) else school_name
+        # 3) 모든 데이터 추출에 하드코딩된 숫자 대신 동적 인덱스(col_idx) 적용
+        sname = str(r12.iloc[col_idx["school_name"]]) if pd.notna(r12.iloc[col_idx["school_name"]]) else school_name
 
-        open_12      = to_date(r12.iloc[16])
-        open_3       = to_date(r3.iloc[16])
-        s_close_12   = to_date(r12.iloc[17])
-        s_open_12    = to_date(r12.iloc[18])
-        w_close_12   = to_date(r12.iloc[19])
-        w_open_12    = to_date(r12.iloc[20])
-        end_12       = to_date(r12.iloc[21])
-        s_close_3    = to_date(r3.iloc[17])
-        s_open_3     = to_date(r3.iloc[18])
-        w_close_3    = to_date(r3.iloc[19])
-        w_open_3     = to_date(r3.iloc[20])
-        grad_3       = to_date(r3.iloc[22])
-        if grad_3 is None: grad_3 = to_date(r3.iloc[21])
+        open_12      = to_date(r12.iloc[col_idx["open"]])
+        open_3       = to_date(r3.iloc[col_idx["open"]])
+        
+        s_close_12   = to_date(r12.iloc[col_idx["s_close"]])
+        s_open_12    = to_date(r12.iloc[col_idx["s_open"]])
+        w_close_12   = to_date(r12.iloc[col_idx["w_close"]])
+        w_open_12    = to_date(r12.iloc[col_idx["w_open"]])
+        end_12       = to_date(r12.iloc[col_idx["end_12"]])
+        
+        s_close_3    = to_date(r3.iloc[col_idx["s_close"]])
+        s_open_3     = to_date(r3.iloc[col_idx["s_open"]])
+        w_close_3    = to_date(r3.iloc[col_idx["w_close"]])
+        w_open_3     = to_date(r3.iloc[col_idx["w_open"]])
+        grad_3       = to_date(r3.iloc[col_idx["grad_3"]])
+        if grad_3 is None:
+            grad_3   = to_date(r3.iloc[col_idx["end_12"]])  # 졸업식이 없으면 종업식 인덱스로 대체
 
-        sem1_12, sem2_12   = to_int(r12.iloc[13]), to_int(r12.iloc[14])
-        sem1_3,  sem2_3    = to_int(r3.iloc[13]),  to_int(r3.iloc[14])
-        disc1_12, disc2_12 = to_int(r12.iloc[51]), to_int(r12.iloc[52])
-        disc1_3,  disc2_3  = to_int(r3.iloc[51]),  to_int(r3.iloc[52])
+        sem1_12, sem2_12   = to_int(r12.iloc[col_idx["sem1"]]), to_int(r12.iloc[col_idx["sem2"]])
+        sem1_3,  sem2_3    = to_int(r3.iloc[col_idx["sem1"]]),  to_int(r3.iloc[col_idx["sem2"]])
+        
+        disc1_12, disc2_12 = to_int(r12.iloc[col_idx["disc1"]]), to_int(r12.iloc[col_idx["disc2"]])
+        disc1_3,  disc2_3  = to_int(r3.iloc[col_idx["disc1"]]),  to_int(r3.iloc[col_idx["disc2"]])
 
         details.append(f"\n### 🏫 {sname}")
 
@@ -207,7 +285,10 @@ def check_school(file_name, df, holidays_set):
             errors.append(f"[{sname}] {msg}")
 
         # --- 점검 2: 1학기 수업일수 ---
-        for label, od, sc, s1d, d1 in [("1~2학년", open_12, s_close_12, sem1_12, disc1_12), ("3학년", open_3, s_close_3, sem1_3, disc1_3)]:
+        for label, od, sc, s1d, d1 in [
+            ("1~2학년", open_12, s_close_12, sem1_12, disc1_12),
+            ("3학년",   open_3,  s_close_3,  sem1_3,  disc1_3),
+        ]:
             details.append(f"\n**[점검2] {label} 1학기 수업일수**")
             if od and sc:
                 wd = count_weekdays(od, sc)
@@ -216,7 +297,8 @@ def check_school(file_name, df, holidays_set):
                 details.append(f"- 개학일({od}) → 여름방학식({sc})")
                 details.append(f"- 평일 {wd}일 − 공휴일 {hol}일 − 재량휴업 {d1}일 = **{calc}일**")
                 details.append(f"- 기재 수업일수: **{s1d}일**")
-                if calc == s1d: details.append("- ✅ 일치")
+                if calc == s1d:
+                    details.append("- ✅ 일치")
                 else:
                     msg = f"❌ {label} 1학기 불일치: 계산 {calc}일 vs 기재 {s1d}일 (차이 {calc - s1d:+d}일)"
                     details.append(f"- {msg}")
@@ -228,8 +310,8 @@ def check_school(file_name, df, holidays_set):
 
         # --- 점검 3: 2학기 수업일수 ---
         for label, so, wc, wo, ed, s2d, d2 in [
-            ("1~2학년", s_open_12, w_close_12, w_open_12, end_12, sem2_12, disc2_12),
-            ("3학년", s_open_3, w_close_3, w_open_3, grad_3, sem2_3, disc2_3)
+            ("1~2학년", s_open_12, w_close_12, w_open_12, end_12,  sem2_12, disc2_12),
+            ("3학년",   s_open_3,  w_close_3,  w_open_3,  grad_3,  sem2_3,  disc2_3),
         ]:
             details.append(f"\n**[점검3] {label} 2학기 수업일수**")
             if so and wc:
@@ -252,7 +334,8 @@ def check_school(file_name, df, holidays_set):
                     details.append(f"- 총 계산: **{calc}일**")
 
                 details.append(f"- 기재 수업일수: **{s2d}일**")
-                if calc == s2d: details.append("- ✅ 일치")
+                if calc == s2d:
+                    details.append("- ✅ 일치")
                 else:
                     msg = f"❌ {label} 2학기 불일치: 계산 {calc}일 vs 기재 {s2d}일 (차이 {calc - s2d:+d}일)"
                     details.append(f"- {msg}")
